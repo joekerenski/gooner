@@ -1,0 +1,10 @@
+.DS_Store/
+
+*.txt
+*.db
+*.db-shm
+*.db-wal
+*.sqlite3
+*.png
+main
+*.env

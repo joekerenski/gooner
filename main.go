@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -66,17 +65,6 @@ func SayMAIN(next http.Handler) http.Handler {
 func SayAPI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Println("I am middleware coming from API MUX!")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func StripSuffix(next http.Handler, suffix string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		if strings.HasSuffix(path, suffix) {
-			newPath := strings.TrimSuffix(path, suffix)
-			r.URL.Path = newPath
-		}
 		next.ServeHTTP(w, r)
 	})
 }
