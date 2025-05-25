@@ -6,13 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gooner/appcontext"
+	"gooner/db"
 )
+
+type AppHandlerFunc func(ctx *appcontext.AppContext)
 
 type Router struct {
 	mux     *http.ServeMux
 	mw      []func(http.Handler) http.Handler // signature of my middleware
 	handler http.Handler
 	tag     string
+	Pool	*db.DBPool
 	Logger  *log.Logger
 }
 
@@ -22,6 +28,7 @@ func NewRouter(tag string) *Router {
 		mw:      []func(http.Handler) http.Handler{},
 		handler: nil,
 		tag:     tag,
+		Pool: 	 nil,
 		Logger:  log.New(os.Stdout, "["+tag+"] ", log.LstdFlags),
 	}
 }
@@ -46,7 +53,20 @@ func (m *Router) Use(middleware func(http.Handler) http.Handler) {
 	m.handler = nil
 }
 
-func (m *Router) Handle(pattern string, handler http.Handler) {
+func (m *Router) Handle(pattern string, handler AppHandlerFunc) {
+    m.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+        ctx := appcontext.GetAppContext()
+        ctx.Writer = w
+        ctx.Request = r
+        ctx.Context = r.Context()
+        ctx.Logger = m.Logger
+		ctx.Pool = m.Pool
+        defer appcontext.CleanPut(ctx)
+        handler(ctx)
+    })
+}
+
+func (m *Router) HandleStatic(pattern string, handler http.Handler) {
 	m.mux.Handle(pattern, handler)
 }
 
@@ -94,5 +114,5 @@ func (m *Router) RegisterFileServer(htmlPath string, assets string) {
 	}
 
 	fs := http.FileServer(http.Dir(assets))
-	m.Handle("/assets/", http.StripPrefix("/assets/", fs))
+	m.HandleStatic("/assets/", http.StripPrefix("/assets/", fs))
 }
