@@ -230,3 +230,4 @@ func ValidateTokenStructure(secret, token string) (*Payload, error) {
 
 	return &payloadData, nil
 }
+
