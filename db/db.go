@@ -1,14 +1,19 @@
 package db
 
 import (
-    "context"
-    "crypto/rand"
     "database/sql"
     "fmt"
-    "net/url"
-    "runtime"
-    "time"
+	"time"
+	"context"
+	"runtime"
+	"math/rand"
+	"net/url"
 
+	"gooner/auth"
+
+    "github.com/golang-migrate/migrate/v4"
+    "github.com/golang-migrate/migrate/v4/database/sqlite3"
+    _ "github.com/golang-migrate/migrate/v4/source/file"
     _ "github.com/mattn/go-sqlite3"
 )
 
@@ -19,6 +24,45 @@ type User struct {
     CreatedAt time.Time `json:"created_at"`
     Password  string    `json:"-"`
     SubTier   int       `json:"sub_tier"`
+}
+
+func InitDB(database string) (*DBPool, error) {
+    writeDB, err := openConnection(database, false)
+    if err != nil {
+        return nil, fmt.Errorf("write pool init failed: %w", err)
+    }
+
+    readDB, err := openConnection(database, true)
+    if err != nil {
+        return nil, fmt.Errorf("read pool init failed: %w", err)
+    }
+
+    if err := runMigrations(writeDB); err != nil {
+        return nil, fmt.Errorf("migration failed: %w", err)
+    }
+
+    return &DBPool{
+        ReadDB:  readDB,
+        WriteDB: writeDB,
+    }, nil
+}
+
+func runMigrations(db *sql.DB) error {
+    driver, err := sqlite3.WithInstance(db, &sqlite3.Config{})
+    if err != nil {
+        return err
+    }
+
+    m, err := migrate.NewWithDatabaseInstance("file://migrations", "sqlite3", driver)
+    if err != nil {
+        return err
+    }
+
+    if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+        return err
+    }
+
+    return nil
 }
 
 type RequestDB struct {
@@ -41,27 +85,6 @@ const (
     foreignKeys = "true"
 )
 
-func InitDB(database string) (*DBPool, error) {
-
-    writeDB, err := openConnection(database, false)
-    if err != nil {
-        return nil, fmt.Errorf("write pool init failed: %w", err)
-    }
-
-    readDB, err := openConnection(database, true)
-    if err != nil {
-        return nil, fmt.Errorf("read pool init failed: %w", err)
-    }
-
-    if err := createUserTable(writeDB); err != nil {
-        return nil, fmt.Errorf("schema creation failed: %w", err)
-    }
-
-    return &DBPool{
-        ReadDB:  readDB,
-        WriteDB: writeDB,
-    }, nil
-}
 
 func openConnection(database string, readonly bool) (*sql.DB, error) {
     params := make(url.Values)
@@ -91,7 +114,7 @@ func openConnection(database string, readonly bool) (*sql.DB, error) {
     }
 
     if readonly {
-        db.SetMaxOpenConns(max(4, runtime.NumCPU()))
+        db.SetMaxOpenConns(max(2, runtime.NumCPU()))
         db.SetMaxIdleConns(2)
     } else {
         db.SetMaxOpenConns(1)
@@ -145,36 +168,6 @@ func GenUUID() (string, error) {
         uuidBytes[10:16])
 
     return uuidStr, nil
-}
-
-func createUserTable(DB *sql.DB) error {
-    tableSQL := `CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        email TEXT NOT NULL UNIQUE,
-        username TEXT NOT NULL,
-        created_at TIMESTAMP NOT NULL,
-        password TEXT NOT NULL,
-        sub_tier SMALLINT DEFAULT 0
-    );`
-
-    tx, err := DB.Begin()
-    if err != nil {
-        return err
-    }
-    defer tx.Rollback()
-
-    statement, err := tx.Prepare(tableSQL)
-    if err != nil {
-        return err
-    }
-    defer statement.Close()
-
-    _, err = statement.Exec()
-    if err != nil {
-        return err
-    }
-    return tx.Commit()
 }
 
 func (rdb *RequestDB) Commit() error {
@@ -302,4 +295,80 @@ func GetUserByEmail(pool *DBPool, ctx context.Context, email string) (*User, err
     }
 
     return &user, nil
+}
+
+// DB functions for refresh token flow
+func StoreRefreshToken(pool *DBPool, ctx context.Context, refreshToken auth.RefreshToken) error {
+    writeTx, err := pool.GetWriteTx(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    defer writeTx.Rollback()
+
+    tokenHash := auth.HashRefreshToken(refreshToken.Token)
+
+    query := `INSERT INTO refresh_tokens (token_hash, user_id, expires_at, created_at) 
+              VALUES (?, ?, ?, ?)`
+
+    _, err = writeTx.ExecContext(ctx, query, 
+        tokenHash, 
+        refreshToken.UserID, 
+        refreshToken.ExpiresAt, 
+        refreshToken.CreatedAt,
+    )
+    if err != nil {
+        return fmt.Errorf("failed to store refresh token: %w", err)
+    }
+
+    return writeTx.Commit()
+}
+
+func GetValidRefreshTokenForUser(pool *DBPool, ctx context.Context, userID string) (*auth.RefreshToken, error) {
+    readTx, err := pool.GetReadTx(ctx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to begin read transaction: %w", err)
+    }
+    defer readTx.Rollback()
+
+    query := `SELECT token_hash, expires_at, created_at 
+              FROM refresh_tokens 
+              WHERE user_id = ? AND expires_at > ? 
+              ORDER BY created_at DESC 
+              LIMIT 1`
+
+    var tokenHash string
+    var refreshToken auth.RefreshToken
+
+    err = readTx.QueryRowContext(ctx, query, userID, time.Now()).Scan(
+        &tokenHash,
+        &refreshToken.ExpiresAt,
+        &refreshToken.CreatedAt,
+    )
+
+    if err != nil {
+        if err == sql.ErrNoRows {
+            return nil, nil
+        }
+        return nil, fmt.Errorf("failed to get refresh token: %w", err)
+    }
+
+    refreshToken.UserID = userID
+
+    return &refreshToken, readTx.Commit()
+}
+
+func RevokeRefreshTokensForUser(pool *DBPool, ctx context.Context, userID string) error {
+    writeTx, err := pool.GetWriteTx(ctx)
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %w", err)
+    }
+    defer writeTx.Rollback()
+
+    query := `DELETE FROM refresh_tokens WHERE user_id = ?`
+    _, err = writeTx.ExecContext(ctx, query, userID)
+    if err != nil {
+        return fmt.Errorf("failed to revoke refresh tokens: %w", err)
+    }
+
+    return writeTx.Commit()
 }

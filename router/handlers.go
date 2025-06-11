@@ -83,22 +83,52 @@ func LoginHandler(ctx *appcontext.AppContext) {
     }
 
     payload := auth.NewPayload(user.UserID)
-    token, err := auth.SignPayload(auth.Secret, payload)
+    jwtToken, err := auth.SignPayload(auth.Secret, payload)
     if err != nil {
         http.Error(ctx.Writer, "Authentication error", http.StatusInternalServerError)
         ctx.Logger.Printf("Failed to create JWT: %v", err)
         return
     }
 
-    cookie := &http.Cookie{
+    refreshToken := auth.NewRefreshToken(user.UserID)
+    err = db.StoreRefreshToken(ctx.Pool, ctx.Context, refreshToken)
+    if err != nil {
+        http.Error(ctx.Writer, "Authentication error", http.StatusInternalServerError)
+        ctx.Logger.Printf("Failed to store refresh token: %v", err)
+        return
+    }
+
+    jwtCookie := &http.Cookie{
         Name:     "AuthToken",
-        Value:    token,
+        Value:    jwtToken,
         Path:     "/",
-        Expires:  time.Now().Add(auth.DefaultExpirationJWT),
+        Expires:  time.Now().Add(auth.DefaultJWTExpiration),
         HttpOnly: true,
         Secure:   true,
         SameSite: http.SameSiteStrictMode,
     }
-    http.SetCookie(ctx.Writer, cookie)
+    http.SetCookie(ctx.Writer, jwtCookie)
+
     http.Redirect(ctx.Writer, ctx.Request, "/home", http.StatusSeeOther)
 }
+
+func LogoutHandler(ctx *appcontext.AppContext) {
+    userID, ok := ctx.Context.Value("userID").(string)  // UserContextKey
+    if ok && userID != "" {
+        db.RevokeRefreshTokensForUser(ctx.Pool, ctx.Context, userID)
+    }
+
+    jwtCookie := &http.Cookie{
+        Name:     "AuthToken",
+        Value:    "",
+        Path:     "/",
+        Expires:  time.Unix(0, 0),
+        HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteStrictMode,
+    }
+    http.SetCookie(ctx.Writer, jwtCookie)
+
+    http.Redirect(ctx.Writer, ctx.Request, "/", http.StatusSeeOther)
+}
+

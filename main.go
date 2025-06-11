@@ -38,7 +38,7 @@ func (w *statusResponseWriter) Write(b []byte) (int, error) {
 // a handler just serves http. got it
 // handlerfunc allows me to turn anything into a handler, okay
 // handlefunc (no "r"!) allows me to define pattern + handler in one go
-func LogShit(next http.Handler) http.Handler {
+func Logger(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
         srw := &statusResponseWriter{
@@ -54,27 +54,23 @@ func LogShit(next http.Handler) http.Handler {
     })
 }
 
-func SayMAIN(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Println("I am middleware coming from MAIN MUX!")
-        next.ServeHTTP(w, r)
-    })
-}
-
-func SayAPI(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        log.Println("I am middleware coming from API MUX!")
-        next.ServeHTTP(w, r)
-    })
-}
+// func SayMAIN(next http.Handler) http.Handler {
+//     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//         log.Println("I am middleware coming from MAIN MUX!")
+//         next.ServeHTTP(w, r)
+//     })
+// }
 
 func Run(pool *db.DBPool, router *router.Router, port string, name string) {
+	// BUG: timeouts make long running requests fail silently!
     server := &http.Server{
         Addr:    ":" + port,
         Handler: router,
+        ReadTimeout:       15 * time.Second,
+        WriteTimeout:      30 * time.Second, 
+        IdleTimeout:       120 * time.Second,
+        ReadHeaderTimeout: 5 * time.Second,
     }
-
-    // add some server timeouts here, too
 
     signalChan := make(chan os.Signal, 1)
     signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
@@ -82,11 +78,22 @@ func Run(pool *db.DBPool, router *router.Router, port string, name string) {
     go func() {
         sig := <-signalChan
         router.Logger.Printf("Received signal: %s. Shutting down. Rip '%s' ... \n", sig, name)
-        ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
         defer cancel()
-        server.Shutdown(ctx)
-        pool.ReadDB.Close()
-        pool.WriteDB.Close()
+
+        if err := server.Shutdown(ctx); err != nil {
+            router.Logger.Printf("Server shutdown error: %v", err)
+        }
+
+        if pool.ReadDB != nil {
+            pool.ReadDB.Close()
+        }
+        if pool.WriteDB != nil {
+            pool.WriteDB.Close()
+        }
+
+        router.Logger.Println("Graceful shutdown completed")
     }()
 
     router.Logger.Printf("%s is running on port %s\n", name, port)
@@ -103,12 +110,11 @@ func main() {
 
     DBPool, err := db.InitDB("users.db")
     if err != nil {
-        mainMux.Logger.Printf("Could not init database! Fuck!")
+		mainMux.Logger.Printf("Could not init database: %s", err)
     }
 
     sessionConfig := middleware.SessionConfig{
         JWTSecret: []byte(auth.Secret),
-        DBPool:    DBPool,
         PublicPaths: map[string]bool{
         "/":           true,
         "/assets":     true,
@@ -121,34 +127,12 @@ func main() {
         return middleware.AuthMiddleware(next, sessionConfig)
     }
 
-    mainMux.Use(LogShit)
-    mainMux.Use(SayMAIN)
+    mainMux.Use(Logger)
     mainMux.Use(authAdapter)
     mainMux.RegisterFileServer("./static", "./static/assets")
 
     apiMux := router.NewRouter("API")
 	apiMux.Pool = DBPool
-    apiMux.Use(SayAPI)
-
-    // apiMux.HandleFunc("GET /users", func(w http.ResponseWriter, r *http.Request) {
-    //     ctx := r.Context()
-    //     allUsers, err := db.GetAllUsers(DBPool, ctx)
-    //     if err != nil {
-    //         http.Error(w, "Failed to get users", http.StatusInternalServerError)
-    //         log.Printf("Failed to get users: %v", err)
-    //         return
-    //     }
-    //
-    //     w.Header().Set("Content-Type", "application/json")
-    //         if err := json.NewEncoder(w).Encode(allUsers); err != nil {
-    //         log.Printf("Error encoding users: %v", err)
-    //     }
-    // })
-    //
-    // apiMux.HandleFunc("GET /lolz", func(w http.ResponseWriter, r *http.Request) {
-    //     resp := "<h1>Hello from Stuttgart</h1>"
-    //     w.Write([]byte(resp))
-    // })
 
     apiMux.Handle("POST /signup", router.SignupHandler)
     apiMux.Handle("POST /login", router.LoginHandler)

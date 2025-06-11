@@ -1,42 +1,46 @@
 package auth
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
-
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"strings"
 )
 
-// Password hashing using bcrypt
-const BCRYPT_COST int = 8
-const DefaultExpirationJWT = 1 * time.Hour
+const BcryptCost int = 12
+const DefaultJWTExpiration = 1 * time.Hour
+const DefaultRefreshExpiration = 7 * 24 * time.Hour
 
-// TODO: replace with random 16-byte strings
-var Pepper = []byte("lucy-is-a-good-kitty")
-var Secret = "lucy-is-a-good-cat"
-var RefreshSecret = []byte("lucy-is-naughty-sometimes")
+var (
+	Pepper        = getEnvBytes("JWT_PEPPER", "lucy-is-a-good-kitty")
+	Secret        = getEnvString("JWT_SECRET", "lucy-is-a-good-cat")
+	RefreshSecret = getEnvBytes("JWT_REFRESH_SECRET", "lucy-is-naughty-sometimes")
+)
 
-func HashPassword(password string) (string, error) {
-
-	pepperPW := append([]byte(password), Pepper...)
-	hashedPW, err := bcrypt.GenerateFromPassword(pepperPW, BCRYPT_COST)
-	if err != nil {
-		return "", err
+func getEnvString(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
 	}
-	return string(hashedPW), nil
+	return fallback
 }
 
-// defining JWT for auth to be stored in secure cookies
-type JWT struct {
-	Header    PayloadHeader `json:"header"`
-	Payload   Payload       `json:"payload"`
-	Signature string        `json:"signature"`
+func getEnvBytes(key, fallback string) []byte {
+	return []byte(getEnvString(key, fallback))
+}
+
+type RefreshToken struct {
+	Token     string    `json:"token"`
+	UserID    string    `json:"user_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type PayloadHeader struct {
@@ -50,18 +54,56 @@ type Payload struct {
 	Exp int64  `json:"exp"`
 }
 
-func NewPayload(sub string) Payload {
-	return Payload{
-		Sub: sub,
-		Iat: time.Now().Unix(),
-		Exp: time.Now().Add(DefaultExpirationJWT).Unix(),
+func HashPassword(password string) (string, error) {
+	pepperPW := append([]byte(password), Pepper...)
+	hashedPW, err := bcrypt.GenerateFromPassword(pepperPW, BcryptCost)
+	if err != nil {
+		return "", fmt.Errorf("failed to hash password: %w", err)
+	}
+	return string(hashedPW), nil
+}
+
+func VerifyPassword(hashedPassword, password string) error {
+	pepperPW := append([]byte(password), Pepper...)
+	return bcrypt.CompareHashAndPassword([]byte(hashedPassword), pepperPW)
+}
+
+func generateSecureToken() string {
+	bytes := make([]byte, 32) // 256 bits
+	if _, err := rand.Read(bytes); err != nil {
+		panic("failed to generate secure random token")
+	}
+	return hex.EncodeToString(bytes)
+}
+
+func HashRefreshToken(token string) string {
+	h := hmac.New(sha256.New, RefreshSecret)
+	h.Write([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+}
+
+func NewRefreshToken(userID string) RefreshToken {
+	return RefreshToken{
+		Token:     generateSecureToken(),
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(DefaultRefreshExpiration),
+		CreatedAt: time.Now(),
 	}
 }
 
-func ToJSON(data any) (string, error) {
+func NewPayload(userID string) Payload {
+	now := time.Now()
+	return Payload{
+		Sub: userID,
+		Iat: now.Unix(),
+		Exp: now.Add(DefaultJWTExpiration).Unix(),
+	}
+}
+
+func toJSON(data any) (string, error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(jsonData), nil
 }
@@ -69,56 +111,122 @@ func ToJSON(data any) (string, error) {
 func SignPayload(secret string, payload Payload) (string, error) {
 	header := PayloadHeader{Alg: "HS256", Typ: "JWT"}
 
-	headerJSON, err := ToJSON(header)
+	headerJSON, err := toJSON(header)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to encode header: %w", err)
 	}
 
-	payloadJSON, err := ToJSON(payload)
+	payloadJSON, err := toJSON(payload)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to encode payload: %w", err)
 	}
+
 	unsignedToken := fmt.Sprintf("%s.%s", headerJSON, payloadJSON)
 
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(unsignedToken))
 	signature := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 
-	jwt := fmt.Sprintf("%s.%s.%s", headerJSON, payloadJSON, signature)
-	return jwt, nil
+	return fmt.Sprintf("%s.%s.%s", headerJSON, payloadJSON, signature), nil
 }
 
 func VerifyPayload(secret, token string) (*Payload, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return nil, fmt.Errorf("Invalid token format!")
+		return nil, fmt.Errorf("invalid token format")
 	}
 
-	header := parts[0]
-	payload := parts[1]
-	signature := parts[2]
+	header, payload, signature := parts[0], parts[1], parts[2]
+
+	headerData, err := base64.RawURLEncoding.DecodeString(header)
+	if err != nil {
+		return nil, fmt.Errorf("invalid header encoding: %w", err)
+	}
+
+	var headerStruct PayloadHeader
+	if err := json.Unmarshal(headerData, &headerStruct); err != nil {
+		return nil, fmt.Errorf("invalid header format: %w", err)
+	}
+
+	if headerStruct.Alg != "HS256" {
+		return nil, fmt.Errorf("unsupported algorithm: %s", headerStruct.Alg)
+	}
 
 	unsignedToken := fmt.Sprintf("%s.%s", header, payload)
-
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(unsignedToken))
 	expectedSig := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
-	if expectedSig != signature {
-		return nil, fmt.Errorf("Invalid signature!")
+
+	if !hmac.Equal([]byte(expectedSig), []byte(signature)) {
+		return nil, fmt.Errorf("invalid signature")
 	}
 
 	jsonPayload, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid payload encoding: %w", err)
 	}
 
 	var payloadData Payload
 	if err := json.Unmarshal(jsonPayload, &payloadData); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid payload format: %w", err)
 	}
 
 	if time.Now().Unix() > payloadData.Exp {
-		return nil, fmt.Errorf("Token expired!")
+		return nil, fmt.Errorf("token expired")
 	}
+
+	return &payloadData, nil
+}
+
+func ExtractUserIDFromExpiredJWT(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid token format")
+	}
+
+	jsonPayload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid payload encoding: %w", err)
+	}
+
+	var payloadData Payload
+	if err := json.Unmarshal(jsonPayload, &payloadData); err != nil {
+		return "", fmt.Errorf("invalid payload format: %w", err)
+	}
+
+	if payloadData.Sub == "" {
+		return "", fmt.Errorf("no user ID in token")
+	}
+
+	return payloadData.Sub, nil
+}
+
+func ValidateTokenStructure(secret, token string) (*Payload, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid token format")
+	}
+
+	header, payload, signature := parts[0], parts[1], parts[2]
+
+	unsignedToken := fmt.Sprintf("%s.%s", header, payload)
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(unsignedToken))
+	expectedSig := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+
+	if !hmac.Equal([]byte(expectedSig), []byte(signature)) {
+		return nil, fmt.Errorf("invalid signature")
+	}
+
+	jsonPayload, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid payload encoding: %w", err)
+	}
+
+	var payloadData Payload
+	if err := json.Unmarshal(jsonPayload, &payloadData); err != nil {
+		return nil, fmt.Errorf("invalid payload format: %w", err)
+	}
+
 	return &payloadData, nil
 }

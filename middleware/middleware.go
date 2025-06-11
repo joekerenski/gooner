@@ -1,94 +1,107 @@
 package middleware
 
 import (
-	"context"
-	"database/sql"
-	"gooner/auth"
-	"gooner/db"
-	"log"
-	"net/http"
-	"strings"
-)
+    "context"
+    "net/http"
+    "strings"
+    "time"
 
-type contextKey string
-
-const (
-	UserContextKey contextKey = "user"
-	DBContextKey   contextKey = "db"
+    "gooner/appcontext"
+    "gooner/auth"
+    "gooner/db"
 )
 
 type SessionConfig struct {
-	JWTSecret   []byte
-	DBPool      *db.DBPool
-	PublicPaths map[string]bool
+    JWTSecret   []byte
+    PublicPaths map[string]bool
 }
 
 func AuthMiddleware(next http.Handler, config SessionConfig) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), DBContextKey, config.DBPool)
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        appCtx := appcontext.GetAppContext()
+        appCtx.Writer = w
+        appCtx.Request = r
+        appCtx.Context = r.Context()
+        defer appcontext.CleanPut(appCtx)
 
-		path := r.URL.Path
-
-        for publicPath, allowed := range config.PublicPaths {
-            if allowed && (path == publicPath || strings.HasPrefix(path, publicPath+"/")) {
-                next.ServeHTTP(w, r.WithContext(ctx))
-                return
-            }
+        if config.PublicPaths[r.URL.Path] || strings.HasPrefix(r.URL.Path, "/assets/") {
+            next.ServeHTTP(w, r)
+            return
         }
 
-		cookie, err := r.Cookie("AuthToken")
-		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+        jwtCookie, err := appCtx.Request.Cookie("AuthToken")
+        if err != nil || jwtCookie.Value == "" {
+            redirectToLogin(appCtx)
+            return
+        }
 
-		// TODO: accept bytes for the jwt secret
-		// also add expiry check here -> redirect to login
-		payload, err := auth.VerifyPayload(string(config.JWTSecret), cookie.Value)
-		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+        payload, err := auth.VerifyPayload(string(config.JWTSecret), jwtCookie.Value)
+        if err != nil {
+            if handleTokenRefresh(appCtx, config, jwtCookie.Value) {
+                next.ServeHTTP(w, r)
+                return
+            }
+            redirectToLogin(appCtx)
+            return
+        }
 
-		readTx, err := config.DBPool.GetReadTx(ctx)
-		if err != nil {
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			log.Printf("Failed to get read transaction: %v", err)
-			return
-		}
-		defer readTx.Rollback()
-
-		var user db.User
-		query := `SELECT user_id, email, username, created_at, password, sub_tier
-                  FROM users WHERE user_id = ?`
-
-		err = readTx.QueryRowContext(ctx, query, payload.Sub).Scan(
-			&user.Id,
-			&user.Email,
-			&user.UserName,
-			&user.CreatedAt,
-			&user.Password,
-			&user.SubTier,
-		)
-
-		if err != nil {
-			if err == sql.ErrNoRows {
-				http.Error(w, "Unauthorized: User not found", http.StatusUnauthorized)
-			} else {
-				log.Printf("Database error: %v", err)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
-			}
-			return
-		}
-
-		if err = readTx.Commit(); err != nil {
-			log.Printf("Failed to commit read transaction: %v", err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-
-		ctx = context.WithValue(ctx, UserContextKey, user)
-
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+        appCtx.Context = context.WithValue(appCtx.Context, "userID", payload.Sub)
+        r = r.WithContext(appCtx.Context)
+        next.ServeHTTP(w, r)
+    })
 }
+
+func handleTokenRefresh(appCtx *appcontext.AppContext, config SessionConfig, expiredJWT string) bool {
+    userID, err := auth.ExtractUserIDFromExpiredJWT(expiredJWT)
+    if err != nil {
+        appCtx.Logger.Printf("Failed to extract user ID from expired JWT: %v", err)
+        return false
+    }
+
+    refreshToken, err := db.GetValidRefreshTokenForUser(appCtx.Pool, appCtx.Context, userID)
+    if err != nil || refreshToken == nil {
+        if err != nil {
+            appCtx.Logger.Printf("Failed to get refresh token for user %s: %v", userID, err)
+        }
+        return false
+    }
+
+    newPayload := auth.NewPayload(userID)
+    newJWT, err := auth.SignPayload(string(config.JWTSecret), newPayload)
+    if err != nil {
+        appCtx.Logger.Printf("Failed to sign new JWT for user %s: %v", userID, err)
+        return false
+    }
+
+    jwtCookie := &http.Cookie{
+        Name:     "AuthToken",
+        Value:    newJWT,
+        Path:     "/",
+        Expires:  time.Now().Add(auth.DefaultJWTExpiration),
+        HttpOnly: true,
+        Secure:   true,
+        SameSite: http.SameSiteStrictMode,
+    }
+    http.SetCookie(appCtx.Writer, jwtCookie)
+
+    appCtx.Context = context.WithValue(appCtx.Context, "userID", userID)
+    *appCtx.Request = *appCtx.Request.WithContext(appCtx.Context)
+
+    appCtx.Logger.Printf("Successfully refreshed JWT for user %s", userID)
+    return true
+}
+
+func redirectToLogin(appCtx *appcontext.AppContext) {
+    if isAPIRequest(appCtx.Request) {
+        http.Error(appCtx.Writer, "Authentication required", http.StatusUnauthorized)
+    } else {
+        http.Redirect(appCtx.Writer, appCtx.Request, "/login", http.StatusSeeOther)
+    }
+}
+
+func isAPIRequest(r *http.Request) bool {
+    return strings.HasPrefix(r.URL.Path, "/api/") || 
+           r.Header.Get("Content-Type") == "application/json" ||
+           r.Header.Get("Accept") == "application/json"
+}
+
