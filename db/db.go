@@ -12,10 +12,23 @@ import (
 	"gooner/auth"
 
     "github.com/golang-migrate/migrate/v4"
+    "github.com/golang-migrate/migrate/v4/database"
     "github.com/golang-migrate/migrate/v4/database/sqlite3"
-    _ "github.com/golang-migrate/migrate/v4/source/file"
+    "github.com/golang-migrate/migrate/v4/database/postgres"
     _ "github.com/mattn/go-sqlite3"
+    _ "github.com/golang-migrate/migrate/v4/source/file"
+    "github.com/jackc/pgx/v5/pgxpool"
 )
+
+type DatabaseConfig struct {
+    Type     string
+    Database string
+    Host     string
+    Port     int
+    User     string
+    Password string
+    SSLMode  string
+}
 
 type User struct {
     Id        string    `json:"id"`
@@ -26,34 +39,113 @@ type User struct {
     SubTier   int       `json:"sub_tier"`
 }
 
-func InitDB(database string) (*DBPool, error) {
-    writeDB, err := openConnection(database, false)
-    if err != nil {
-        return nil, fmt.Errorf("write pool init failed: %w", err)
-    }
+func InitDB(config DatabaseConfig) (*DBPool, error) {
 
-    readDB, err := openConnection(database, true)
-    if err != nil {
-        return nil, fmt.Errorf("read pool init failed: %w", err)
-    }
+    switch config.Type {
+    case "sqlite3":
+		writeDB, err := openSQLiteConnection(config.Database, false)
+        if err != nil {
+            return nil, fmt.Errorf("sqlite write pool init failed: %w", err)
+        }
+        readDB, err := openSQLiteConnection(config.Database, true)
+        if err != nil {
+            return nil, fmt.Errorf("sqlite read pool init failed: %w", err)
+        }
 
-    if err := runMigrations(writeDB); err != nil {
-        return nil, fmt.Errorf("migration failed: %w", err)
-    }
+        if err := runMigrations(writeDB, "sqlite3"); err != nil {
+            return nil, fmt.Errorf("sqlite migrations failed: %w", err)
+        }
 
-    return &DBPool{
-        ReadDB:  readDB,
-        WriteDB: writeDB,
-    }, nil
+        return &DBPool{
+            ReadDB:  readDB,
+            WriteDB: writeDB,
+            Type:    config.Type,
+        }, nil
+
+    case "postgres":
+        pool, err := initPostgresPool(config)
+        if err != nil {
+            return nil, fmt.Errorf("postgres pool init failed: %w", err)
+        }
+
+        connStr := buildPostgresConnectionString(config)
+        sqlDB, err := sql.Open("pgx", connStr)
+        if err != nil {
+            return nil, fmt.Errorf("postgres migration connection failed: %w", err)
+        }
+
+        if err := runMigrations(sqlDB, "postgres"); err != nil {
+            sqlDB.Close()
+            return nil, fmt.Errorf("postgres migrations failed: %w", err)
+        }
+        sqlDB.Close()
+
+        return &DBPool{
+            PgxPool: pool,
+            Type:    config.Type,
+        }, nil
+
+    default:
+        return nil, fmt.Errorf("unsupported database type: %s", config.Type)
+    }
 }
 
-func runMigrations(db *sql.DB) error {
-    driver, err := sqlite3.WithInstance(db, &sqlite3.Config{})
+func buildPostgresConnectionString(config DatabaseConfig) string {
+    sslMode := config.SSLMode
+    if sslMode == "" {
+        sslMode = "disable"
+    }
+
+    return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+        config.Host, config.Port, config.User, config.Password, config.Database, sslMode)
+}
+
+func initPostgresPool(config DatabaseConfig) (*pgxpool.Pool, error) {
+    connStr := buildPostgresConnectionString(config)
+
+    poolConfig, err := pgxpool.ParseConfig(connStr)
+    if err != nil {
+        return nil, err
+    }
+
+    poolConfig.MaxConns = 25
+    poolConfig.MinConns = 5
+    poolConfig.MaxConnLifetime = time.Hour
+    poolConfig.MaxConnIdleTime = 30 * time.Minute
+
+    pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
+    if err != nil {
+        return nil, err
+    }
+
+    if err := pool.Ping(context.Background()); err != nil {
+        return nil, fmt.Errorf("postgres pool ping failed: %w", err)
+    }
+
+    return pool, nil
+}
+
+func runMigrations(db *sql.DB, dbType string) error {
+	var driver database.Driver
+    var err error
+    var migrationPath string
+
+    switch dbType {
+    case "sqlite3":
+		driver, err = sqlite3.WithInstance(db, &sqlite3.Config{})
+        migrationPath = "file://migrations/sqlite"
+    case "postgres":
+		driver, err = postgres.WithInstance(db, &postgres.Config{})
+        migrationPath = "file://migrations/postgres"
+    default:
+        return fmt.Errorf("unsupported database type for migrations: %s", dbType)
+    }
+
     if err != nil {
         return err
     }
 
-    m, err := migrate.NewWithDatabaseInstance("file://migrations", "sqlite3", driver)
+    m, err := migrate.NewWithDatabaseInstance(migrationPath, dbType, driver)
     if err != nil {
         return err
     }
@@ -73,6 +165,8 @@ type RequestDB struct {
 type DBPool struct {
     ReadDB  *sql.DB
     WriteDB *sql.DB
+    PgxPool *pgxpool.Pool
+    Type    string
 }
 
 const (
@@ -85,8 +179,7 @@ const (
     foreignKeys = "true"
 )
 
-
-func openConnection(database string, readonly bool) (*sql.DB, error) {
+func openSQLiteConnection(database string, readonly bool) (*sql.DB, error) {
     params := make(url.Values)
     params.Add("_journal_mode", journalMode)
     params.Add("_busy_timeout", busyTimeout)

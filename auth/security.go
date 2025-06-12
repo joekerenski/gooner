@@ -16,14 +16,22 @@ import (
 )
 
 const BcryptCost int = 12
-const DefaultJWTExpiration = 1 * time.Hour
-const DefaultRefreshExpiration = 7 * 24 * time.Hour
 
 var (
-	Pepper        = getEnvBytes("JWT_PEPPER", "lucy-is-a-good-kitty")
-	Secret        = getEnvString("JWT_SECRET", "lucy-is-a-good-cat")
-	RefreshSecret = getEnvBytes("JWT_REFRESH_SECRET", "lucy-is-naughty-sometimes")
+    JWTSecret        string
+    RefreshSecret    []byte
+    Pepper           []byte
+    JWTExpiration    time.Duration
+    RefreshExpiration time.Duration
 )
+
+func InitAuthParams(jwtSecret, refreshSecret, pepper string, jwtExp, refreshExp time.Duration) {
+    JWTSecret = jwtSecret
+    RefreshSecret = []byte(refreshSecret)
+    Pepper = []byte(pepper)
+    JWTExpiration = jwtExp
+    RefreshExpiration = refreshExp
+}
 
 func getEnvString(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
@@ -86,7 +94,7 @@ func NewRefreshToken(userID string) RefreshToken {
 	return RefreshToken{
 		Token:     generateSecureToken(),
 		UserID:    userID,
-		ExpiresAt: time.Now().Add(DefaultRefreshExpiration),
+        ExpiresAt: time.Now().Add(RefreshExpiration),
 		CreatedAt: time.Now(),
 	}
 }
@@ -96,7 +104,7 @@ func NewPayload(userID string) Payload {
 	return Payload{
 		Sub: userID,
 		Iat: now.Unix(),
-		Exp: now.Add(DefaultJWTExpiration).Unix(),
+		Exp: now.Add(JWTExpiration).Unix(),
 	}
 }
 

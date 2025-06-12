@@ -1,0 +1,24 @@
+server:
+  port: "8000"
+  host: "localhost"
+  name: "GOONER"
+
+database:
+  type: "sqlite3"  # or "postgres"
+  database: "app.db"
+
+auth:
+  jwt_secret: "your-jwt-secret"
+  refresh_secret: "your-refresh-secret"
+  pepper: "your-pepper-value"
+  token_expiry: "24h"
+  refresh_expiry: "168h"
+
+stripe:
+  public_key: "pk_test_..."
+  secret_key: "sk_test_..."
+  webhook_secret: "whsec_..."
+
+webhooks:
+  secret: "your-webhook-secret"
+  timeout: "30s"

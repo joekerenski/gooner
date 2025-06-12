@@ -25,6 +25,7 @@ func SignupHandler(ctx *appcontext.AppContext) {
 
     if err := db.InsertUser(ctx.Pool, ctx.Context, email, username, hashedPassword); err != nil {
         http.Error(ctx.Writer, "Error inserting user into database", http.StatusInternalServerError)
+        ctx.Logger.Printf("User insert error: %v", err)
         return
     }
 
@@ -83,7 +84,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
     }
 
     payload := auth.NewPayload(user.UserID)
-    jwtToken, err := auth.SignPayload(auth.Secret, payload)
+    jwtToken, err := auth.SignPayload(auth.JWTSecret, payload)
     if err != nil {
         http.Error(ctx.Writer, "Authentication error", http.StatusInternalServerError)
         ctx.Logger.Printf("Failed to create JWT: %v", err)
@@ -102,7 +103,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
         Name:     "AuthToken",
         Value:    jwtToken,
         Path:     "/",
-        Expires:  time.Now().Add(auth.DefaultJWTExpiration),
+        Expires:  time.Now().Add(auth.JWTExpiration),
         HttpOnly: true,
         Secure:   true,
         SameSite: http.SameSiteStrictMode,

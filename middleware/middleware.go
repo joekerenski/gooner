@@ -78,7 +78,7 @@ func handleTokenRefresh(appCtx *appcontext.AppContext, config SessionConfig, exp
         Name:     "AuthToken",
         Value:    newJWT,
         Path:     "/",
-        Expires:  time.Now().Add(auth.DefaultJWTExpiration),
+        Expires:  time.Now().Add(auth.JWTExpiration),
         HttpOnly: true,
         Secure:   true,
         SameSite: http.SameSiteStrictMode,
