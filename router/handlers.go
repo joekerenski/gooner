@@ -37,29 +37,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
     email := ctx.Request.FormValue("email")
     password := ctx.Request.FormValue("password")
 
-    readTx, err := ctx.Pool.GetReadTx(ctx.Context)
-    if err != nil {
-        http.Error(ctx.Writer, "Database error", http.StatusInternalServerError)
-        ctx.Logger.Printf("Failed to begin transaction: %v", err)
-        return
-    }
-    defer readTx.Rollback()
-
-    query := `SELECT user_id, email, username, password FROM users WHERE email = ?`
-    var user struct {
-        UserID   string
-        Email    string
-        Username string
-        Password string
-    }
-
-    err = readTx.QueryRowContext(ctx.Context, query, email).Scan(
-        &user.UserID,
-        &user.Email,
-        &user.Username,
-        &user.Password,
-    )
-
+	user, err := db.GetUserByEmail(ctx.Pool, ctx.Context, email)
     if err != nil {
         if err == sql.ErrNoRows {
             http.Error(ctx.Writer, "Invalid credentials", http.StatusUnauthorized)
@@ -68,13 +46,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
         http.Error(ctx.Writer, "Database error", http.StatusInternalServerError)
         ctx.Logger.Printf("Error querying user: %v", err)
         return
-    }
-
-    if err = readTx.Commit(); err != nil {
-        http.Error(ctx.Writer, "Database error", http.StatusInternalServerError)
-        ctx.Logger.Printf("Failed to commit transaction: %v", err)
-        return
-    }
+	}
 
     pepperPW := append([]byte(password), auth.Pepper...)
     err = bcrypt.CompareHashAndPassword([]byte(user.Password), pepperPW)
@@ -83,7 +55,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
         return
     }
 
-    payload := auth.NewPayload(user.UserID)
+    payload := auth.NewPayload(user.Id)
     jwtToken, err := auth.SignPayload(auth.JWTSecret, payload)
     if err != nil {
         http.Error(ctx.Writer, "Authentication error", http.StatusInternalServerError)
@@ -91,7 +63,7 @@ func LoginHandler(ctx *appcontext.AppContext) {
         return
     }
 
-    refreshToken := auth.NewRefreshToken(user.UserID)
+    refreshToken := auth.NewRefreshToken(user.Id)
     err = db.StoreRefreshToken(ctx.Pool, ctx.Context, refreshToken)
     if err != nil {
         http.Error(ctx.Writer, "Authentication error", http.StatusInternalServerError)

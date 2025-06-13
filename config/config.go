@@ -2,90 +2,95 @@ package config
 
 import (
     "fmt"
-    "strings"
-    "github.com/spf13/viper"
+    "os"
+    "gopkg.in/yaml.v3"
 )
 
 type Config struct {
     Server struct {
-        Port    string `mapstructure:"port"`
-        Host    string `mapstructure:"host"`
-        Name    string `mapstructure:"name"`
-    } `mapstructure:"server"`
+        Port string `yaml:"port" env:"APP_SERVER_PORT"`
+        Host string `yaml:"host" env:"APP_SERVER_HOST"`
+        Name string `yaml:"name" env:"APP_SERVER_NAME"`
+    } `yaml:"server"`
 
     Database struct {
-        Type     string `mapstructure:"type"`     // "sqlite3" or "postgres"
-        Database string `mapstructure:"database"` // db name or file path
-        Host     string `mapstructure:"host"`
-        Port     int    `mapstructure:"port"`
-        User     string `mapstructure:"user"`
-        Password string `mapstructure:"password"`
-        SSLMode  string `mapstructure:"ssl_mode"`
-    } `mapstructure:"database"`
+        Type     string `yaml:"type" env:"APP_DATABASE_TYPE"`
+        Database string `yaml:"database" env:"APP_DATABASE_DATABASE"`
+        Host     string `yaml:"host" env:"APP_DATABASE_HOST"`
+        Port     int    `yaml:"port" env:"APP_DATABASE_PORT"`
+        User     string `yaml:"user" env:"APP_DATABASE_USER"`
+        Password string `yaml:"password" env:"APP_DATABASE_PASSWORD"`
+        SSLMode  string `yaml:"ssl_mode" env:"APP_DATABASE_SSL_MODE"`
+    } `yaml:"database"`
 
     Auth struct {
-        JWTSecret     string `mapstructure:"jwt_secret"`
-        RefreshSecret string `mapstructure:"refresh_secret"`
-        Pepper        string `mapstructure:"pepper"`
-        TokenExpiry   string `mapstructure:"token_expiry"`
-        RefreshExpiry string `mapstructure:"refresh_expiry"`
-    } `mapstructure:"auth"`
-    
+        JWTSecret     string `yaml:"jwt_secret" env:"APP_AUTH_JWT_SECRET"`
+        RefreshSecret string `yaml:"refresh_secret" env:"APP_AUTH_REFRESH_SECRET"`
+        Pepper        string `yaml:"pepper" env:"APP_AUTH_PEPPER"`
+        TokenExpiry   string `yaml:"token_expiry" env:"APP_AUTH_TOKEN_EXPIRY"`
+        RefreshExpiry string `yaml:"refresh_expiry" env:"APP_AUTH_REFRESH_EXPIRY"`
+    } `yaml:"auth"`
+
     OAuth struct {
-        GoogleClientID     string `mapstructure:"google_client_id"`
-        GoogleClientSecret string `mapstructure:"google_client_secret"`
-        RedirectURL        string `mapstructure:"redirect_url"`
-    } `mapstructure:"oauth"`
-    
+        GoogleClientID     string `yaml:"google_client_id" env:"APP_OAUTH_GOOGLE_CLIENT_ID"`
+        GoogleClientSecret string `yaml:"google_client_secret" env:"APP_OAUTH_GOOGLE_CLIENT_SECRET"`
+        RedirectURL        string `yaml:"redirect_url" env:"APP_OAUTH_REDIRECT_URL"`
+    } `yaml:"oauth"`
+
     Stripe struct {
-        PublicKey    string `mapstructure:"public_key"`
-        SecretKey    string `mapstructure:"secret_key"`
-        WebhookSecret string `mapstructure:"webhook_secret"`
-    } `mapstructure:"stripe"`
-    
+        PublicKey     string `yaml:"public_key" env:"APP_STRIPE_PUBLIC_KEY"`
+        SecretKey     string `yaml:"secret_key" env:"APP_STRIPE_SECRET_KEY"`
+        WebhookSecret string `yaml:"webhook_secret" env:"APP_STRIPE_WEBHOOK_SECRET"`
+    } `yaml:"stripe"`
+
     Webhooks struct {
-        Secret   string `mapstructure:"secret"`
-        Timeout  string `mapstructure:"timeout"`
-    } `mapstructure:"webhooks"`
+        Secret  string `yaml:"secret" env:"APP_WEBHOOKS_SECRET"`
+        Timeout string `yaml:"timeout" env:"APP_WEBHOOKS_TIMEOUT"`
+    } `yaml:"webhooks"`
 }
 
 func Load() (*Config, error) {
-    viper.SetConfigName("config")
-    viper.SetConfigType("yaml")
-    viper.AddConfigPath(".")
-    viper.AddConfigPath("./config")
-    
-    // Environment variable support
-    viper.AutomaticEnv()
-    viper.SetEnvPrefix("APP")
-    viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-    
-    // Set defaults
-    setDefaults()
-    
-    // Read config file (optional - fallback to env vars)
-    if err := viper.ReadInConfig(); err != nil {
-        if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-            return nil, fmt.Errorf("error reading config file: %w", err)
+    config := &Config{}
+
+    setDefaults(config)
+
+    if data, err := os.ReadFile("config.yaml"); err == nil {
+        if err := yaml.Unmarshal(data, config); err != nil {
+            return nil, fmt.Errorf("error parsing config.yaml: %w", err)
+        }
+    } else {
+        if data, err := os.ReadFile("./config/config.yaml"); err == nil {
+            if err := yaml.Unmarshal(data, config); err != nil {
+                return nil, fmt.Errorf("error parsing config/config.yaml: %w", err)
+            }
         }
     }
-    
-    var config Config
-    if err := viper.Unmarshal(&config); err != nil {
-        return nil, fmt.Errorf("unable to decode config: %w", err)
-    }
-    
-    return &config, nil
+
+    // overrideWithEnv(config)
+
+    return config, nil
 }
 
-func setDefaults() {
-    viper.SetDefault("server.port", "8000")
-    viper.SetDefault("server.host", "localhost")
-    viper.SetDefault("server.name", "GOONER")
-    viper.SetDefault("database.type", "sqlite3")
-    viper.SetDefault("database.database", "app.db")
-    viper.SetDefault("database.ssl_mode", "disable")
-    viper.SetDefault("auth.token_expiry", "24h")
-    viper.SetDefault("auth.refresh_expiry", "168h")
-    viper.SetDefault("webhooks.timeout", "30s")
+func setDefaults(config *Config) {
+    config.Server.Port = "8000"
+    config.Server.Host = "localhost"
+    config.Server.Name = "GOONER"
+    config.Database.Type = "sqlite3"
+    config.Database.Database = "app.db"
+    config.Database.SSLMode = "disable"
+    config.Auth.TokenExpiry = "24h"
+    config.Auth.RefreshExpiry = "168h"
+    config.Webhooks.Timeout = "30s"
+}
+
+func overrideWithEnv(config *Config) {
+    if val := os.Getenv("APP_SERVER_PORT"); val != "" {
+        config.Server.Port = val
+    }
+    if val := os.Getenv("APP_SERVER_HOST"); val != "" {
+        config.Server.Host = val
+    }
+    if val := os.Getenv("APP_SERVER_NAME"); val != "" {
+        config.Server.Name = val
+    }
 }
