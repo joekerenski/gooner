@@ -7,6 +7,7 @@ import (
 	"gooner/auth"
 	"gooner/webhooks"
 	"gooner/config"
+	"gooner/websocket"
 
 	"gooner/chat"
 
@@ -89,6 +90,9 @@ func main() {
         refreshExp,
     )
 	
+	wsHub := websocket.NewHub()
+    go wsHub.Run()
+
     mainMux := router.NewRouter(config.Server.Name)
 
     DBPool, err := db.InitDB(dbConfig)
@@ -127,6 +131,7 @@ func main() {
 	apiMux.Handle("GET /chat/messages", chat.GetMessagesHandler)
 	apiMux.Handle("GET /stress-test", chat.StressTestHandler)
     apiMux.Handle("POST /webhooks/generic", webhookHandler.GenericWebhook)
+    apiMux.Handle("GET /ws", websocket.WebSocketHandler(wsHub))
 
     mainMux.Include(apiMux, "/api")
 

@@ -127,6 +127,7 @@ func (m *Router) Include(router *Router, prefix string) {
 	m.mux.Handle(prefix+"/", http.StripPrefix(prefix, router.handler))
 }
 
+// TODO: optimize this
 func (m *Router) RegisterFileServer(htmlPath string, assets string) {
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {

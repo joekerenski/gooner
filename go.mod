@@ -4,6 +4,7 @@ go 1.24.1
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.18.3
+	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/mattn/go-sqlite3 v1.14.24
 	golang.org/x/crypto v0.37.0
