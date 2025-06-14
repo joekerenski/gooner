@@ -8,6 +8,7 @@ import (
 	"gooner/webhooks"
 	"gooner/config"
 	"gooner/websocket"
+	"gooner/admin"
 
 	"gooner/chat"
 
@@ -132,6 +133,8 @@ func main() {
 	apiMux.Handle("GET /stress-test", chat.StressTestHandler)
     apiMux.Handle("POST /webhooks/generic", webhookHandler.GenericWebhook)
     apiMux.Handle("GET /ws", websocket.WebSocketHandler(wsHub))
+
+	apiMux.Handle("GET /admin/metrics", admin.MetricsHandler)
 
     mainMux.Include(apiMux, "/api")
 

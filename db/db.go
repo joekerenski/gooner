@@ -41,7 +41,7 @@ type User struct {
 }
 
 func InitDB(config DatabaseConfig) (*DBPool, error) {
-
+	// make sure to add .db to database name when using sqlite3
     switch config.Type {
     case "sqlite3":
 		writeDB, err := openSQLiteConnection(config.Database, false)
